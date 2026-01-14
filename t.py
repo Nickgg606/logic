@@ -5,7 +5,7 @@ from datetime import datetime
 import pandas as pd
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
 from flask import Flask, render_template_string, jsonify
-import os  # 用來讀取 Render 的 PORT 環境變數
+import os
 
 app = Flask(__name__)
 
@@ -34,8 +34,8 @@ def load_five_odds_from_excel(excel_file):
             race_df = df[df[1] == race_no]
             odds_dict = {}
             for _, row in race_df.iterrows():
-                horse_no = row[2]  # C列 = 馬號
-                five = row[8]  # I列 = 5點賠率
+                horse_no = row[2]
+                five = row[8]
                 if pd.notna(horse_no) and pd.notna(five):
                     try:
                         odds_dict[int(horse_no)] = float(five)
@@ -80,7 +80,6 @@ def assign_groups(sorted_horses):
         'A2': sorted_horses[2:5] if len(sorted_horses) >= 5 else sorted_horses[2:len(sorted_horses)],
         'A3': sorted_horses[5:] if len(sorted_horses) >= 5 else []
     }
-    # 組內強制按馬號由細到大排
     for g in groups:
         groups[g] = sorted(groups[g], key=lambda x: int(x[0]))
     return groups
@@ -89,13 +88,12 @@ def change_label(change):
     if change == 0: return "0 (不變)"
     return f"落飛" if change > 0 else f"回飛"
 
-# ==================== 主 async 流程（雲端用預設值，無 GUI） ====================
+# ==================== 主 async 流程（雲端用預設值） ====================
 async def main():
     global base_url, start_race, end_race, pages
     
-    # 雲端預設賽日（可改為環境變數）
     date = datetime.now().strftime("%Y-%m-%d")
-    venue = "HV"  # 或 "ST"，可改
+    venue = "HV"
     start_race = 1
     end_race = 9
     
@@ -202,7 +200,7 @@ async def monitor_race(page, race_no):
 def api_data():
     return jsonify(global_data)
 
-# ==================== Flask 主頁面（完整內容顯示） ====================
+# ==================== Flask 主頁面 ====================
 @app.route('/')
 def home():
     return """
@@ -278,7 +276,6 @@ def home():
                                     content += `<p>最後更新: ${race.last_update}</p>`;
                                 }
 
-                                // 先顯示即時賠率（移到馬名列表上面）
                                 if (race.current_odds) {
                                     content += `<h3>即時賠率</h3>`;
                                     content += `<p>A1: ${race.current_theory?.A1 || 'N/A'} | A2: ${race.current_theory?.A2 || 'N/A'} | A3: ${race.current_theory?.A3 || 'N/A'}</p>`;
@@ -327,9 +324,8 @@ def home():
                     });
             }
 
-            // 第一次更新延遲 5 秒（等後端載入完數據）
             setTimeout(updatePage, 5000);
-            setInterval(updatePage, 1000);  // 之後每 1 秒更新一次
+            setInterval(updatePage, 1000);
         </script>
     </body>
     </html>
