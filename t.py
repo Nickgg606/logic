@@ -5,7 +5,7 @@ from datetime import datetime
 import pandas as pd
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
 from flask import Flask, render_template_string, jsonify
-import os
+import os  # 用來讀取 Render 的 PORT 環境變數
 
 app = Flask(__name__)
 
@@ -34,8 +34,8 @@ def load_five_odds_from_excel(excel_file):
             race_df = df[df[1] == race_no]
             odds_dict = {}
             for _, row in race_df.iterrows():
-                horse_no = row[2]
-                five = row[8]
+                horse_no = row[2]  # C列 = 馬號
+                five = row[8]  # I列 = 5點賠率
                 if pd.notna(horse_no) and pd.notna(five):
                     try:
                         odds_dict[int(horse_no)] = float(five)
@@ -93,7 +93,7 @@ async def main():
     global base_url, start_race, end_race, pages
     
     date = datetime.now().strftime("%Y-%m-%d")
-    venue = "HV"
+    venue = "HV"  # 可改為 "ST"
     start_race = 1
     end_race = 9
     
@@ -195,12 +195,7 @@ async def monitor_race(page, race_no):
         
         await asyncio.sleep(1)
 
-# ==================== Flask API 路由（只定義一次） ====================
-@app.route('/api/data')
-def api_data():
-    return jsonify(global_data)
-
-# ==================== Flask 主頁面 ====================
+# ==================== Flask 主頁面（完整內容顯示） ====================
 @app.route('/')
 def home():
     return """
@@ -276,6 +271,7 @@ def home():
                                     content += `<p>最後更新: ${race.last_update}</p>`;
                                 }
 
+                                // 先顯示即時賠率（移到馬名列表上面）
                                 if (race.current_odds) {
                                     content += `<h3>即時賠率</h3>`;
                                     content += `<p>A1: ${race.current_theory?.A1 || 'N/A'} | A2: ${race.current_theory?.A2 || 'N/A'} | A3: ${race.current_theory?.A3 || 'N/A'}</p>`;
