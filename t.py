@@ -252,14 +252,7 @@ def home():
         <script>
             function updatePage() {
                 fetch('/api/data')
-                    .then(response => {
-                        if (!response.ok) {
-                            console.error('API 錯誤:', response.status);
-                            document.getElementById('loading').innerText = '載入失敗，請檢查後端';
-                            return;
-                        }
-                        return response.json();
-                    })
+                    .then(response => response.json())
                     .then(data => {
                         document.getElementById('status').innerText = data.status || '未知';
                         document.getElementById('last_update').innerText = data.last_update || '未知';
@@ -331,7 +324,7 @@ def home():
     </html>
     """
 
-# ==================== Flask API 路由（只定義一次） ====================
+# ==================== Flask API 路由 ====================
 @app.route('/api/data')
 def api_data():
     return jsonify(global_data)
