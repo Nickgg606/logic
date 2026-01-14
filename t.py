@@ -5,7 +5,7 @@ from datetime import datetime
 import pandas as pd
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
 from flask import Flask, render_template_string, jsonify
-import os  # 用來讀取 Render 的 PORT 環境變數
+import os  # 用來讀取 Render 的 PORT
 
 app = Flask(__name__)
 
@@ -88,13 +88,13 @@ def change_label(change):
     if change == 0: return "0 (不變)"
     return f"落飛" if change > 0 else f"回飛"
 
-# ==================== 主 async 流程（雲端用預設值，無 GUI） ====================
+# ==================== 主 async 流程（雲端用預設值） ====================
 async def main():
     global base_url, start_race, end_race, pages
     
     # 雲端預設賽日（可改為環境變數）
     date = datetime.now().strftime("%Y-%m-%d")
-    venue = "HV"  # 或 "ST"，可改
+    venue = "HV"  # 可改為 "ST"
     start_race = 1
     end_race = 9
     
@@ -106,7 +106,7 @@ async def main():
         return
     
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-setuid-sandbox'])  # 用 chromium + 必要參數
+        browser = await p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-setuid-sandbox'])
         
         tasks = []
         for race_no in range(start_race, end_race + 1):
@@ -118,83 +118,6 @@ async def main():
         await asyncio.gather(*tasks)
         
         await asyncio.sleep(3600 * 24)
-
-# ==================== 後台監控每場 ====================
-async def monitor_race(page, race_no):
-    url = f"{base_url}/{race_no}"
-    race_data[race_no] = {'current_odds': {}, 'last_update': None, 'theory': {}, 'horse_names': {}, 'five_odds': {}, 'status': '載入馬名中...'}
-    
-    await page.goto(url, wait_until="networkidle", timeout=60000)
-    try:
-        table_id = f"rc-odds-table-compact-{race_no}"
-        table = await page.wait_for_selector(f"#{table_id}", timeout=45000)
-        rows = await table.query_selector_all("tr")
-        horse_names = {}
-        for row in rows[1:-1]:
-            cols = await row.query_selector_all("td")
-            if len(cols) >= 6:
-                horse_no_text = (await cols[0].inner_text()).strip()
-                horse_name = (await cols[3].inner_text()).strip()
-                if horse_no_text.isdigit():
-                    horse_names[int(horse_no_text)] = horse_name
-        race_data[race_no]['horse_names'] = horse_names
-        race_data[race_no]['status'] = '馬名載入完成，等待馬會出賠率...'
-        print(f"第 {race_no} 場 馬名載入完成")
-    except Exception as e:
-        print(f"第 {race_no} 場 抓馬名失敗: {e}")
-        race_data[race_no]['horse_names'] = {i: f"馬{i}" for i in range(1, 15)}
-        race_data[race_no]['status'] = '賽事未開始 / 無賠率表，使用預設馬名'
-    
-    five_odds = auto_fill_five_odds(race_no, race_data[race_no]['horse_names'])
-    race_data[race_no]['five_odds'] = five_odds
-    
-    while True:
-        try:
-            await page.goto(url, wait_until="networkidle", timeout=60000)
-            table = await page.wait_for_selector(f"#{table_id}", timeout=45000)
-            rows = await table.query_selector_all("tr")
-            
-            current_odds = {}
-            has_odds = False
-            for row in rows[1:-1]:
-                cols = await row.query_selector_all("td")
-                if len(cols) >= 6:
-                    horse_no_text = (await cols[0].inner_text()).strip()
-                    if horse_no_text.isdigit():
-                        horse_no = int(horse_no_text)
-                        try:
-                            win_a = await cols[4].query_selector("div[class*='win'] a")
-                            if win_a:
-                                win_odds_str = (await win_a.inner_text()).strip()
-                                if win_odds_str.upper() == "SCR":
-                                    continue
-                                win_odds = float(win_odds_str) if win_odds_str != "N/A" else None
-                                if win_odds is not None:
-                                    has_odds = True
-                                current_odds[horse_no] = win_odds
-                        except:
-                            pass
-            
-            if has_odds:
-                race_data[race_no]['status'] = '已偵測到賠率，正在更新...'
-                race_data[race_no]['current_odds'] = current_odds
-                race_data[race_no]['five_theory'] = calculate_theory_odds(race_data[race_no]['five_odds'])
-                race_data[race_no]['current_theory'] = calculate_theory_odds(current_odds)
-                race_data[race_no]['last_update'] = datetime.now()
-            else:
-                race_data[race_no]['status'] = '馬會未出賠率，等待中...'
-            
-            global_data["race_data"][race_no] = race_data[race_no].copy()
-            global_data["status"] = "更新中"
-            global_data["last_update"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] 第 {race_no} 場 更新完成 | 狀態: {race_data[race_no]['status']} | 賠率數量: {len(current_odds)}")
-            
-        except Exception as e:
-            race_data[race_no]['status'] = f'更新錯誤: {str(e)[:50]}...'
-            print(f"第 {race_no} 場 更新錯誤: {e}")
-        
-        await asyncio.sleep(1)
 
 # ==================== Flask API 路由 ====================
 @app.route('/api/data')
