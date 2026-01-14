@@ -5,7 +5,7 @@ from datetime import datetime
 import pandas as pd
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
 from flask import Flask, render_template_string, jsonify
-import os  # 用來讀取 Render 的 PORT 環境變數
+import os  # 用來讀取 Render 的 PORT
 
 app = Flask(__name__)
 
@@ -34,8 +34,8 @@ def load_five_odds_from_excel(excel_file):
             race_df = df[df[1] == race_no]
             odds_dict = {}
             for _, row in race_df.iterrows():
-                horse_no = row[2]  # C列 = 馬號
-                five = row[8]  # I列 = 5點賠率
+                horse_no = row[2]
+                five = row[8]
                 if pd.notna(horse_no) and pd.notna(five):
                     try:
                         odds_dict[int(horse_no)] = float(five)
@@ -105,7 +105,9 @@ async def main():
         return
     
     async with async_playwright() as p:
+        print("啟動 chromium 瀏覽器...")
         browser = await p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-setuid-sandbox'])
+        print("chromium 瀏覽器啟動成功")
         
         tasks = []
         for race_no in range(start_race, end_race + 1):
@@ -118,40 +120,37 @@ async def main():
         
         await asyncio.sleep(3600 * 24)
 
-# ==================== 後台監控每場 ====================
+# ==================== 後台監控每場（加 debug print） ====================
 async def monitor_race(page, race_no):
     url = f"{base_url}/{race_no}"
     race_data[race_no] = {'current_odds': {}, 'last_update': None, 'theory': {}, 'horse_names': {}, 'five_odds': {}, 'status': '載入馬名中...'}
     
-    await page.goto(url, wait_until="networkidle", timeout=60000)
-    try:
-        table_id = f"rc-odds-table-compact-{race_no}"
-        table = await page.wait_for_selector(f"#{table_id}", timeout=45000)
-        rows = await table.query_selector_all("tr")
-        horse_names = {}
-        for row in rows[1:-1]:
-            cols = await row.query_selector_all("td")
-            if len(cols) >= 6:
-                horse_no_text = (await cols[0].inner_text()).strip()
-                horse_name = (await cols[3].inner_text()).strip()
-                if horse_no_text.isdigit():
-                    horse_names[int(horse_no_text)] = horse_name
-        race_data[race_no]['horse_names'] = horse_names
-        race_data[race_no]['status'] = '馬名載入完成，等待馬會出賠率...'
-        print(f"第 {race_no} 場 馬名載入完成")
-    except Exception as e:
-        print(f"第 {race_no} 場 抓馬名失敗: {e}")
-        race_data[race_no]['horse_names'] = {i: f"馬{i}" for i in range(1, 15)}
-        race_data[race_no]['status'] = '賽事未開始 / 無賠率表，使用預設馬名'
-    
-    five_odds = auto_fill_five_odds(race_no, race_data[race_no]['horse_names'])
-    race_data[race_no]['five_odds'] = five_odds
-    
     while True:
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] 第 {race_no} 場 - 開始抓取")
         try:
+            print(f"第 {race_no} 場 - goto {url}")
             await page.goto(url, wait_until="networkidle", timeout=60000)
+            print(f"第 {race_no} 場 - 等待 table #{table_id}")
+            table_id = f"rc-odds-table-compact-{race_no}"
             table = await page.wait_for_selector(f"#{table_id}", timeout=45000)
+            print(f"第 {race_no} 場 - table 找到")
             rows = await table.query_selector_all("tr")
+            print(f"第 {race_no} 場 - 找到 {len(rows)} 行")
+            
+            horse_names = {}
+            for row in rows[1:-1]:
+                cols = await row.query_selector_all("td")
+                if len(cols) >= 6:
+                    horse_no_text = (await cols[0].inner_text()).strip()
+                    horse_name = (await cols[3].inner_text()).strip()
+                    if horse_no_text.isdigit():
+                        horse_names[int(horse_no_text)] = horse_name
+            race_data[race_no]['horse_names'] = horse_names
+            race_data[race_no]['status'] = '馬名載入完成，等待馬會出賠率...'
+            print(f"第 {race_no} 場 馬名載入完成")
+            
+            five_odds = auto_fill_five_odds(race_no, race_data[race_no]['horse_names'])
+            race_data[race_no]['five_odds'] = five_odds
             
             current_odds = {}
             has_odds = False
@@ -171,8 +170,8 @@ async def monitor_race(page, race_no):
                                 if win_odds is not None:
                                     has_odds = True
                                 current_odds[horse_no] = win_odds
-                        except:
-                            pass
+                        except Exception as e:
+                            print(f"第 {race_no} 場 - 抓取馬號 {horse_no} 賠率錯誤: {e}")
             
             if has_odds:
                 race_data[race_no]['status'] = '已偵測到賠率，正在更新...'
@@ -180,18 +179,18 @@ async def monitor_race(page, race_no):
                 race_data[race_no]['five_theory'] = calculate_theory_odds(race_data[race_no]['five_odds'])
                 race_data[race_no]['current_theory'] = calculate_theory_odds(current_odds)
                 race_data[race_no]['last_update'] = datetime.now()
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] 第 {race_no} 場 更新完成 | 狀態: 已偵測到賠率，正在更新... | 賠率數量: {len(current_odds)}")
             else:
                 race_data[race_no]['status'] = '馬會未出賠率，等待中...'
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] 第 {race_no} 場 - 無賠率偵測到")
             
             global_data["race_data"][race_no] = race_data[race_no].copy()
             global_data["status"] = "更新中"
             global_data["last_update"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] 第 {race_no} 場 更新完成 | 狀態: {race_data[race_no]['status']} | 賠率數量: {len(current_odds)}")
-            
         except Exception as e:
             race_data[race_no]['status'] = f'更新錯誤: {str(e)[:50]}...'
-            print(f"第 {race_no} 場 更新錯誤: {e}")
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] 第 {race_no} 場 - 抓取錯誤: {str(e)}")
         
         await asyncio.sleep(1)
 
@@ -247,14 +246,7 @@ def home():
         <script>
             function updatePage() {
                 fetch('/api/data')
-                    .then(response => {
-                        if (!response.ok) {
-                            console.error('API 錯誤:', response.status);
-                            document.getElementById('loading').innerText = '載入失敗，請檢查後端';
-                            return;
-                        }
-                        return response.json();
-                    })
+                    .then(response => response.json())
                     .then(data => {
                         document.getElementById('status').innerText = data.status || '未知';
                         document.getElementById('last_update').innerText = data.last_update || '未知';
@@ -271,7 +263,6 @@ def home():
                                     content += `<p>最後更新: ${race.last_update}</p>`;
                                 }
 
-                                // 先顯示即時賠率（移到馬名列表上面）
                                 if (race.current_odds) {
                                     content += `<h3>即時賠率</h3>`;
                                     content += `<p>A1: ${race.current_theory?.A1 || 'N/A'} | A2: ${race.current_theory?.A2 || 'N/A'} | A3: ${race.current_theory?.A3 || 'N/A'}</p>`;
