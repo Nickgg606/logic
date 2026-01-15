@@ -6,24 +6,25 @@ import pandas as pd
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
 from flask import Flask, jsonify
 import os
+import gc
 
 app = Flask(__name__)
 
-# ==================== 全局變數 ====================
+# 全局變數
 global_data = {
     "race_data": {},
     "status": "未開始",
     "last_update": None
 }
-pages = {}
+
 base_url = ""
 start_race = 1
 end_race = 9
 race_data = {}
 
-# ==================== 從 Excel 自動讀取 5點賠率 ====================
+# ==================== Excel 讀取 ====================
 def load_five_odds_from_excel(excel_file):
-    print(f"正在從 Excel 檔讀取 5點賠率: {excel_file}")
+    print(f"讀取 Excel: {excel_file}")
     try:
         df = pd.read_excel(excel_file, sheet_name=0, header=None)
         df.columns = range(df.shape[1])
@@ -40,158 +41,114 @@ def load_five_odds_from_excel(excel_file):
                     try:
                         odds_dict[int(horse_no)] = float(five)
                     except:
-                        print(f"警告：場次 {race_no} 馬號 {horse_no} 格式錯誤，已忽略")
+                        print(f"格式錯: 場 {race_no} 馬 {horse_no}")
             if odds_dict:
                 five_odds_all[int(race_no)] = odds_dict
-                print(f"場次 {race_no} 讀取完成：{len(odds_dict)} 匹馬")
+                print(f"場 {race_no} 讀取 {len(odds_dict)} 匹馬")
         return five_odds_all
     except Exception as e:
-        print(f"讀取 Excel 失敗: {e}")
+        print(f"Excel 錯誤: {e}")
         return {}
 
 EXCEL_FILE = "HKJC_odds_tracker_live_20260114_1768294826.xlsx"
 five_odds_from_excel = load_five_odds_from_excel(EXCEL_FILE)
 
-# ==================== 計算理論賠率 ====================
+# ==================== 理論賠率計算 ====================
 def calculate_theory_odds(odds_dict):
     if not odds_dict:
-        return {'A1': 0, 'A2': 0, 'A3': 0}
+        return {'A1': 'N/A', 'A2': 'N/A', 'A3': 'N/A'}
     sorted_horses = sorted(odds_dict.items(), key=lambda x: x[1])
-    a1 = sorted_horses[0:2] if len(sorted_horses) >= 2 else sorted_horses[:len(sorted_horses)]
-    a2 = sorted_horses[2:5] if len(sorted_horses) >= 5 else sorted_horses[2:len(sorted_horses)]
+    a1 = sorted_horses[:2] if len(sorted_horses) >= 2 else sorted_horses
+    a2 = sorted_horses[2:5] if len(sorted_horses) >= 5 else sorted_horses[2:]
     a3 = sorted_horses[5:] if len(sorted_horses) >= 5 else []
-    
-    def sort_by_horse_no(group):
-        return sorted(group, key=lambda x: x[0])
-    
-    a1 = sort_by_horse_no(a1)
-    a2 = sort_by_horse_no(a2)
-    a3 = sort_by_horse_no(a3)
     
     def theory(group):
         total_prob = sum(1 / odds for _, odds in group if odds > 0)
-        return round(1 / total_prob, 2) if total_prob > 0 else 0
+        return round(1 / total_prob, 2) if total_prob > 0 else 'N/A'
     
     return {'A1': theory(a1), 'A2': theory(a2), 'A3': theory(a3)}
 
-def assign_groups(sorted_horses):
-    groups = {
-        'A1': sorted_horses[0:2] if len(sorted_horses) >= 2 else sorted_horses[:len(sorted_horses)],
-        'A2': sorted_horses[2:5] if len(sorted_horses) >= 5 else sorted_horses[2:len(sorted_horses)],
-        'A3': sorted_horses[5:] if len(sorted_horses) >= 5 else []
-    }
-    for g in groups:
-        groups[g] = sorted(groups[g], key=lambda x: int(x[0]))
-    return groups
-
-def change_label(change):
-    if change == 0: return "0 (不變)"
-    return f"落飛" if change > 0 else f"回飛"
-
-# ==================== 自動填補 five_odds ====================
-def auto_fill_five_odds(race_no, horse_names):
-    five = five_odds_from_excel.get(race_no, {})
-    # 如果 Excel 無對應馬號，可加 fallback，但暫時直接 return
-    return five
-
-# ==================== 主 async 流程 ====================
+# ==================== 單 page scraper ====================
 async def main():
-    global base_url, start_race, end_race, pages
-    
+    global base_url
     date = datetime.now().strftime("%Y-%m-%d")
-    venue = "ST"  # 今日 Sha Tin, 如夜賽改 "HV"
-    start_race = 1
-    end_race = 9
-    
+    venue = "ST"  # 改 "HV" 如果夜賽
     base_url = f"https://bet.hkjc.com/ch/racing/wpq/{date}/{venue}"
-    print(f"使用預設賽日: {date} {venue}, 場次 {start_race}–{end_race}")
-    
+    print(f"Scraper started - Base URL: {base_url}")
+
     async with async_playwright() as p:
         print("啟動 chromium 瀏覽器...")
         browser = await p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'])
         print("chromium 啟動成功")
-        
-        tasks = []
-        for race_no in range(start_race, end_race + 1):
-            context = await browser.new_context()
-            page = await context.new_page()
-            pages[race_no] = page
-            tasks.append(asyncio.create_task(monitor_race(page, race_no)))
-        
-        await asyncio.gather(*tasks)
-        
-        # 保持長期運行
-        await asyncio.sleep(3600 * 24 * 7)  # 1 week
+        page = await browser.new_page()  # 只開 1 page
 
-# ==================== 後台監控每場 ====================
-async def monitor_race(page, race_no):
-    url = f"{base_url}/{race_no}"
-    race_data[race_no] = {'current_odds': {}, 'last_update': None, 'five_theory': {}, 'current_theory': {}, 'horse_names': {}, 'five_odds': {}, 'status': '載入馬名中...'}
-    
-    while True:
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] 第 {race_no} 場 - 開始循環")
-        try:
-            await page.goto(url, wait_until="networkidle", timeout=60000)
-            print(f"第 {race_no} 場 - goto 成功")
-            
-            # Selector: 根據實際頁面 inspect 調整；常見 fallback
-            try:
-                table = await page.wait_for_selector(f"#rc-odds-table-compact-{race_no}", timeout=45000)
-            except PlaywrightTimeoutError:
-                print(f"ID selector fail, trying fallback")
-                table = await page.query_selector("table, div[class*='odds'], .compact")
-                if not table:
-                    raise Exception("No odds table found")
-            
-            rows = await table.query_selector_all("tr")
-            print(f"找到 {len(rows)} 行")
-            
-            horse_names = {}
-            current_odds = {}
-            has_odds = False
-            
-            for row in rows[1:-1]:
-                cols = await row.query_selector_all("td")
-                if len(cols) >= 6:
-                    horse_no_text = (await cols[0].inner_text()).strip()
-                    horse_name = (await cols[3].inner_text()).strip()
-                    if horse_no_text.isdigit():
-                        horse_no = int(horse_no_text)
-                        horse_names[horse_no] = horse_name
-                        
-                        win_a = await cols[4].query_selector("div[class*='win'] a, a")
-                        if win_a:
-                            win_odds_str = (await win_a.inner_text()).strip()
-                            if win_odds_str.upper() == "SCR":
-                                continue
-                            try:
-                                current_odds[horse_no] = float(win_odds_str)
-                                has_odds = True
-                            except:
-                                pass
-            
-            five_odds = auto_fill_five_odds(race_no, horse_names)
-            race_data[race_no]['five_odds'] = five_odds
-            race_data[race_no]['horse_names'] = horse_names
-            race_data[race_no]['current_odds'] = current_odds
-            race_data[race_no]['five_theory'] = calculate_theory_odds(five_odds)
-            race_data[race_no]['current_theory'] = calculate_theory_odds(current_odds) if has_odds else {'A1':'N/A','A2':'N/A','A3':'N/A'}
-            race_data[race_no]['last_update'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            race_data[race_no]['status'] = '已偵測到賠率，正在更新...' if has_odds else '馬會未出賠率，等待中...'
-            
-            global_data["race_data"][race_no] = race_data[race_no].copy()
-            global_data["status"] = "更新中"
-            global_data["last_update"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            
-            print(f"第 {race_no} 場 更新完成")
-        
-        except Exception as e:
-            print(f"第 {race_no} 場 錯誤: {str(e)}")
-            race_data[race_no]['status'] = f'更新錯誤: {str(e)[:50]}...'
-        
-        await asyncio.sleep(10)  # 調大到10秒，減少 memory 壓力
+        while True:
+            print("開始掃描所有場次...")
+            for race_no in range(start_race, end_race + 1):
+                url = f"{base_url}/{race_no}"
+                print(f"Scraping race {race_no}: {url}")
+                try:
+                    await page.goto(url, wait_until="networkidle", timeout=60000)
+                    print(f"Goto success for race {race_no}")
 
-# ==================== Flask 主頁面 - 完整 HTML ====================
+                    # Selector 調整：用通用版，避免 id 錯
+                    table = await page.query_selector("table, div[class*='odds'], .compact, [id*='odds-table']")
+                    if not table:
+                        print(f"Race {race_no} - No table found, skip")
+                        continue
+
+                    rows = await table.query_selector_all("tr")
+                    print(f"Race {race_no} - Found {len(rows)} rows")
+
+                    horse_names = {}
+                    current_odds = {}
+                    has_odds = False
+
+                    for row in rows[1:-1]:
+                        cols = await row.query_selector_all("td")
+                        if len(cols) >= 6:
+                            horse_no_text = (await cols[0].inner_text()).strip()
+                            if horse_no_text.isdigit():
+                                horse_no = int(horse_no_text)
+                                horse_name = (await cols[3].inner_text()).strip()
+                                horse_names[horse_no] = horse_name
+
+                                win_element = await cols[4].query_selector("div[class*='win'] a, a, span")
+                                if win_element:
+                                    win_odds_str = (await win_element.inner_text()).strip()
+                                    print(f"Race {race_no} - Horse {horse_no} odds: {win_odds_str}")
+                                    if win_odds_str.upper() not in ["SCR", "N/A", ""]:
+                                        try:
+                                            current_odds[horse_no] = float(win_odds_str)
+                                            has_odds = True
+                                        except:
+                                            pass
+
+                    five_odds = five_odds_from_excel.get(race_no, {})
+                    race_data[race_no] = {
+                        'horse_names': horse_names,
+                        'current_odds': current_odds,
+                        'five_odds': five_odds,
+                        'five_theory': calculate_theory_odds(five_odds),
+                        'current_theory': calculate_theory_odds(current_odds) if has_odds else {'A1':'N/A','A2':'N/A','A3':'N/A'},
+                        'last_update': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        'status': '已偵測到賠率' if has_odds else '馬名載入完成，無即時賠率'
+                    }
+
+                    global_data["race_data"][race_no] = race_data[race_no].copy()
+                    global_data["status"] = "更新中"
+                    global_data["last_update"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+                    print(f"Race {race_no} scraped OK | Horses: {len(horse_names)} | Odds: {len(current_odds)}")
+
+                except Exception as e:
+                    print(f"Race {race_no} error: {str(e)}")
+
+            gc.collect()
+            print("掃描完成，等待 30 秒...")
+            await asyncio.sleep(30)
+
+# ==================== Flask 路由 ====================
 @app.route('/')
 def home():
     return """
@@ -222,7 +179,6 @@ def home():
         <h1>獨贏賠率監控</h1>
         <p>狀態: <span id="status" class="status">載入中...</span></p>
         <p>最後更新: <span id="last_update">載入中...</span></p>
-
         <div class="intro">
             <strong>隔夜賠率懶人包📋</strong><br><br>
             1. 隔夜賠率是什麼<br>
@@ -236,10 +192,8 @@ def home():
             - Backtest 是根據歷史 最終賠率<br>
             - 最終的賠率是一個 未知變量
         </div>
-
         <div id="loading">正在載入數據...</div>
         <div id="content"></div>
-
         <script>
             function updatePage() {
                 fetch('/api/data')
@@ -248,7 +202,6 @@ def home():
                         document.getElementById('status').innerText = data.status || '未知';
                         document.getElementById('last_update').innerText = data.last_update || '未知';
                         document.getElementById('loading').style.display = 'none';
-
                         let content = '';
                         if (data.race_data && Object.keys(data.race_data).length > 0) {
                             let sortedRaces = Object.keys(data.race_data).sort((a, b) => Number(a) - Number(b));
@@ -259,22 +212,18 @@ def home():
                                 if (race.last_update) {
                                     content += `<p>最後更新: ${race.last_update}</p>`;
                                 }
-
                                 if (race.current_odds) {
                                     content += `<h3>即時賠率</h3>`;
                                     content += `<p>A1: ${race.current_theory?.A1 || 'N/A'} | A2: ${race.current_theory?.A2 || 'N/A'} | A3: ${race.current_theory?.A3 || 'N/A'}</p>`;
                                 }
-
                                 if (race.horse_names) {
                                     content += `<h3>馬名列表（A1/A2/A3 分組）</h3>`;
-
                                     let sorted_five = Object.entries(race.five_odds || {}).sort((a, b) => a[1] - b[1]);
                                     let groups = {
                                         'A1': sorted_five.slice(0, 2),
                                         'A2': sorted_five.slice(2, 5),
                                         'A3': sorted_five.slice(5)
                                     };
-
                                     for (let group_name in groups) {
                                         let group = groups[group_name];
                                         if (group.length > 0) {
@@ -293,13 +242,11 @@ def home():
                                         }
                                     }
                                 }
-
                                 content += `<hr>`;
                             });
                         } else {
                             content = '<p>暫無數據，請等待監控更新... (今日可能無賽事)</p>';
                         }
-
                         document.getElementById('content').innerHTML = content;
                     })
                     .catch(error => {
@@ -307,38 +254,35 @@ def home():
                         console.error('更新錯誤:', error);
                     });
             }
-
             setTimeout(updatePage, 5000);
-            setInterval(updatePage, 1000);
+            setInterval(updatePage, 5000);  // 改 5秒一次，減負荷
         </script>
     </body>
     </html>
     """
 
-# ==================== API ====================
 @app.route('/api/data')
 def api_data():
     return jsonify(global_data)
 
-# ==================== 啟動 Flask + Scraper ====================
+# ==================== 啟動 ====================
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     
-    # 啟動 Flask 在 thread
     def run_flask():
         app.run(host='0.0.0.0', port=port, debug=False)
     
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
     
-    # 啟動 scraper 在另一 thread
     def run_scraper():
+        print("Starting scraper thread...")
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
             loop.run_until_complete(main())
         except Exception as e:
-            print("Async main error:", e)
+            print("Scraper error:", e)
     
     scraper_thread = threading.Thread(target=run_scraper, daemon=True)
     scraper_thread.start()
