@@ -1,0 +1,40 @@
+# 用官方 Python slim 鏡像，輕量 + 有基本 libs
+FROM python:3.13-slim-bookworm
+
+# 安裝系統 dependencies（Playwright Chromium 需要，Render Docker 環境會成功）
+RUN apt-get update && apt-get install -y \
+    libnss3 \
+    libatk1.0-0 \
+    libatk-bridge2.0-0 \
+    libcups2 \
+    libdrm2 \
+    libxkbcommon0 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxfixes3 \
+    libxrandr2 \
+    libgbm1 \
+    libasound2 \
+    libpango-1.0-0 \
+    libcairo2 \
+    libatspi2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+# 設定工作目錄
+WORKDIR /app
+
+# 先 copy requirements.txt 安裝 pip packages（cache 加速）
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# 安裝 Playwright browser binary（Chromium）
+RUN playwright install --with-deps chromium
+
+# Copy 全部 code（包括 render.py, Excel 等）
+COPY . .
+
+# 暴露 port（Render 用 $PORT）
+EXPOSE $PORT
+
+# 啟動命令（用 gunicorn 生產模式，workers=1 防 memory spike）
+CMD ["gunicorn", "render:app", "--bind", "0.0.0.0:$PORT", "--workers", "1", "--timeout", "120"]
