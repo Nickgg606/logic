@@ -37,4 +37,5 @@ COPY . .
 EXPOSE $PORT
 
 # 啟動命令（用 gunicorn 生產模式，workers=1 防 memory spike）
-CMD ["gunicorn", "render:app", "--bind", "0.0.0.0:$PORT", "--workers", "1", "--timeout", "120"]
+
+CMD ["gunicorn", "t:app", "--bind", "0.0.0.0:$PORT", "--workers", "1", "--timeout", "120"]
